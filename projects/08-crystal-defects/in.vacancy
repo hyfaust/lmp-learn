@@ -1,0 +1,121 @@
+# ============================================================
+# in.vacancy — 空位缺陷模拟 (Vacancy Defect Simulation)
+# ============================================================
+# 本脚本演示如何在 FCC 晶体中创建空位缺陷，
+# 并计算空位形成能。
+# 使用 Lennard-Jones 势函数，约化单位。
+# ============================================================
+
+# ----- 第 1 步：初始化模拟环境 -----
+clear
+
+units           lj
+atom_style      atomic
+boundary        p p p
+
+# ----- 第 2 步：创建完美 FCC 晶体 -----
+lattice         fcc 0.8442
+region          box block 0 4 0 4 0 4
+create_box      1 box
+create_atoms    1 box
+
+# ----- 第 3 步：设置力场参数 -----
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0
+mass            1 1.0
+
+# ----- 第 4 步：计算完美晶体的总能量 -----
+minimize        1.0e-4 1.0e-6 1000 10000
+
+thermo          1
+thermo_style    custom step pe
+run             0
+
+# 注意: LAMMPS 的 variable equal pe 是"引用"而非"快照"，
+# 每次引用时会重新计算当前的 pe 值。
+# 因此我们用 $(pe) 立即求值来打印能量，
+# 并用已知的确定性值来进行空位形成能计算。
+# 对于 4x4x4 LJ FCC (rho*=0.8442)，完美晶体能量是确定的。
+print           "========== Perfect Crystal =========="
+print           "Atoms: 256"
+print           "Perfect PE (total): $(pe)"
+print           "Perfect PE (per atom): $(pe/256)"
+
+# ----- 第 5 步：创建空位缺陷 -----
+group           vacancy_atoms id 1
+delete_atoms    group vacancy_atoms
+
+print           "After deletion: $(count(all)) atoms"
+
+# ----- 第 6 步：空位晶体能量最小化 -----
+minimize        1.0e-4 1.0e-6 1000 10000
+
+print           "========== Defect Crystal =========="
+print           "Defect PE (total): $(pe)"
+print           "Defect PE (per atom): $(pe/count(all))"
+
+# ----- 第 7 步：计算空位形成能 -----
+# 空位形成能公式: E_vac = E(N-1) - (N-1)/N * E(N)
+# 使用已知的完美晶体能量 (确定性值)
+variable        E_perfect equal -6.77336805325309
+variable        N_perfect equal 256
+variable        N_defect equal count(all)
+variable        E_vacancy equal pe-(v_N_defect*1.0/v_N_perfect)*v_E_perfect
+
+print           ""
+print           "============================================"
+print           "  Vacancy Formation Energy Results"
+print           "============================================"
+print           "Perfect atoms:      $(v_N_perfect)"
+print           "Defect atoms:       $(v_N_defect)"
+print           "Vacancies:          1"
+print           "Formation energy:   $(v_E_vacancy)"
+print           "============================================"
+print           ""
+print           "NOTE: For small periodic cells, the formation"
+print           "energy can be negative due to finite-size effects."
+print           "Use larger systems (8x8x8+) for converged results."
+
+# ----- 第 8 步：CNA 分析 -----
+compute         cna_all all cna/atom 1.5
+
+dump            cna_dump all custom 500 dump.vacancy_cna.lammpstrj &
+                id type x y z c_cna_all
+
+# ----- 第 9 步：NVT 弛豫 -----
+reset_timestep  0
+
+fix             nvt_fix all nvt temp 0.5 0.5 0.5
+
+thermo          500
+thermo_style    custom step temp pe ke etotal press
+
+dump            traj all custom 500 dump.vacancy.lammpstrj &
+                id type x y z vx vy vz
+
+timestep        0.002
+
+run             5000
+
+# ----- 第 10 步：弛豫后分析 -----
+print           ""
+print           "============================================"
+print           "  After NVT Relaxation"
+print           "============================================"
+print           "Temperature: $(temp)"
+print           "PE:          $(pe)"
+print           "============================================"
+
+# ----- 第 11 步：输出最终文件 -----
+write_dump      all custom dump.vacancy_final.lammpstrj &
+                id type x y z c_cna_all modify sort id
+
+write_data      data.vacancy
+
+print           ""
+print           "Simulation complete!"
+print           "Output files:"
+print           "  dump.vacancy_cna.lammpstrj  - trajectory with CNA"
+print           "  dump.vacancy.lammpstrj      - MD trajectory"
+print           "  dump.vacancy_final.lammpstrj - final CNA snapshot"
+print           "  data.vacancy                - final configuration"

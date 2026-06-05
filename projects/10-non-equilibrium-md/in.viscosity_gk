@@ -1,0 +1,189 @@
+# ============================================================
+# LAMMPS 输入脚本：Green-Kubo 粘度计算（平衡态方法）
+# 功能：通过应力自相关函数计算剪切粘度
+#       不施加任何外部扰动，纯平衡态 MD
+# 单位：lj (Lennard-Jones 约化单位)
+#
+# Green-Kubo 公式：
+#   η = (V / kBT) × ∫₀^∞ <σxy(0) · σxy(t)> dt
+#
+# 其中：
+#   V   = 体系体积
+#   kB  = 玻尔兹曼常数 (= 1 在 LJ 单位中)
+#   T   = 温度
+#   σxy = 剪切应力分量
+#   < > = 系综平均 / 时间平均
+# ============================================================
+
+# ----------------------------------------------------------
+# 第 1 部分：初始化和模型搭建
+# ----------------------------------------------------------
+
+clear
+
+units           lj
+atom_style      atomic
+
+# 创建正方体盒子（各边约 10σ）
+# 使用较低密度以获得液态 LJ 系统
+lattice         fcc 0.8442
+region          box block 0 10 0 10 0 10
+create_box      1 box
+create_atoms    1 box
+
+# LJ 势函数参数
+mass            1 1.0
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+
+# 邻居列表
+neighbor        0.3 bin
+neigh_modify    every 5 delay 0 check yes
+
+# 初始速度：温度 T* = 1.4（液态 LJ 的常用温度）
+velocity        all create 1.4 54321
+
+# ----------------------------------------------------------
+# 第 2 部分：先做 NVT 平衡
+# ----------------------------------------------------------
+
+# 先用 NVT 系综平衡系统
+# 让温度和结构达到稳态
+fix             1 all nvt temp 1.4 1.4 0.5
+
+thermo          1000
+thermo_style    custom step temp press pe ke etotal
+
+print           "阶段 1：NVT 平衡 (1000 步) ..."
+run             1000
+
+unfix           1
+
+# ----------------------------------------------------------
+# 第 3 部分：切换到 NVE 系综进行 Green-Kubo 采样
+# ----------------------------------------------------------
+
+# 【重要】Green-Kubo 方法需要在 NVE 系综下运行
+# 原因：恒温器会人为地修改粒子速度，
+#       导致应力涨落被"污染"，自相关函数不准确
+#
+# 如果坚持用 NVT，需要非常温和的恒温器
+# 但最严格的做法是用 NVE
+
+reset_timestep  0
+
+fix             2 all nve
+
+# ----------------------------------------------------------
+# 第 4 部分：设置应力计算
+# ----------------------------------------------------------
+
+# 计算瞬时温度 (必须在 pressure 之前定义)
+compute         myTemp all temp
+
+# 计算全局应力张量 (需要温度 compute)
+compute         myPress all pressure myTemp
+
+# 定义变量，提取应力张量的不同分量
+# c_myPress[1] = Pxx,  c_myPress[2] = Pyy,  c_myPress[3] = Pzz
+# c_myPress[4] = Pxy,  c_myPress[5] = Pxz,  c_myPress[6] = Pyz
+#
+# 注意：LAMMPS 的 pressure 计算输出的是压力（张量除以体积），
+#       但符号与应力相反。应力 σ = -P。
+#       不过在自相关函数中 σxy(0)·σxy(t) = Pxy(0)·Pxy(t)，
+#       因为两个负号相乘会抵消。
+variable        pxy equal c_myPress[4]
+variable        pxz equal c_myPress[5]
+variable        pyz equal c_myPress[6]
+
+# 同时计算体积（Green-Kubo 公式需要 V）
+variable        vol equal vol
+variable        tnow equal c_myTemp
+
+# ----------------------------------------------------------
+# 第 5 部分：应力自相关函数 (SACF) 的计算
+# ----------------------------------------------------------
+
+# 【核心命令】fix ave/correlate：计算时间自相关函数
+#
+# 参数详解：
+#   1                : 每 1 步采样一次
+#   1                : 每次采样 1 个数据点
+#   100              : 每 100 步输出一次自相关函数
+#   c_myPress[4]     : 对 Pxy 分量做自相关
+#   c_myPress[5]     : 对 Pxz 分量做自相关
+#   c_myPress[6]     : 对 Pyz 分量做自相关
+#   type auto        : 自动选择自相关计算方式
+#   file sacf.dat    : 输出文件
+#   overwrite        : 每次输出时覆盖旧数据（否则会累积）
+#   ave running      : 做累积平均（随时间推移统计更精确）
+#
+# 输出文件格式：
+#   第1列: 时间延迟 t (步数)
+#   第2列: <Pxy(0)·Pxy(t)> 的归一化自相关
+#   第3列: <Pxz(0)·Pxz(t)> 的归一化自相关
+#   第4列: <Pyz(0)·Pyz(t)> 的归一化自相关
+#   第5列: 采样次数 N (越多越准确)
+
+fix             sacf all ave/correlate 1 1 100 &
+                v_pxy v_pxz v_pyz &
+                type auto file sacf.dat overwrite ave running
+
+# ----------------------------------------------------------
+# 第 6 部分：运行生产阶段
+# ----------------------------------------------------------
+
+# 热力学输出
+thermo          5000
+thermo_style    custom step temp press pe ke etotal v_vol v_tnow
+
+# 输出轨迹文件（可选，用于可视化）
+# dump            1 all custom 1000 dump.lammpstrj &
+#                 id type x y z vx vy vz
+
+print           "============================================"
+print           "阶段 2：NVE 生产运行 (20000 步) ..."
+print           "正在采样应力自相关函数 ..."
+print           "============================================"
+
+# 生产运行：20000 步 (教程演示用)
+# 实际计算建议 100000+ 步以获得收敛结果
+run             5000
+
+# ----------------------------------------------------------
+# 第 7 部分：输出计算所需的信息
+# ----------------------------------------------------------
+
+# 计算最终的平均温度和体积
+# 这些值用于 Green-Kubo 公式的前因子 V/(kBT)
+variable        kb equal 1.0
+# 获取最终温度（从 thermo 输出或用 equal style 变量）
+variable        T_final equal 1.4
+variable        V_final equal v_vol
+
+print           ""
+print           "============================================"
+print           "Green-Kubo 粘度计算完成！"
+print           "============================================"
+print           ""
+print           "输出文件：sacf.dat"
+print           ""
+print           "后续处理步骤（用 Python）："
+print           "  1. 读取 sacf.dat"
+print           "  2. 取三个分量的平均值: C(t) = (Cxy + Cxz + Cyz) / 3"
+print           "  3. 对 C(t) 做数值积分: I(t) = Δt × Σ C(t)"
+print           "  4. 计算粘度: η(t) = (V / kB T) × I(t)"
+print           "  5. 取 I(t) 的平台值作为最终粘度"
+print           ""
+print           "Python 伪代码："
+print           "  import numpy as np"
+print           '  data = np.loadtxt("sacf.dat", skiprows=3)'
+print           "  t = data[:, 0]  # 时间步"
+print           "  C = (data[:, 1] + data[:, 2] + data[:, 3]) / 3"
+print           "  dt = 0.005  # 时间步长（LJ 单位）"
+print           "  I = np.cumsum(C) * dt  # 累积积分"
+print           "  eta = (V / kB / T) * I"
+print           "  # 取 eta 的平台区域作为最终值"
+
+# 写出最终构型
+write_data      final_equilibrium.dat

@@ -1,0 +1,187 @@
+# ============================================================
+# in.tensile — 单轴拉伸测试模拟 (Uniaxial Tensile Test)
+# ============================================================
+# 本脚本模拟 FCC 晶体在 z 方向的单轴拉伸过程，
+# 记录应力-应变曲线，观察断裂行为。
+# 使用 Lennard-Jones 势函数，约化单位。
+# ============================================================
+
+# ----- 第 1 步：初始化模拟环境 -----
+clear
+
+# 使用 LJ 约化单位
+units           lj
+atom_style      atomic
+# 三维周期性边界 (NPT 和 deform 需要周期性边界)
+boundary        p p p
+
+# ----- 第 2 步：创建完美 FCC 晶体 -----
+# 使用 LJ 约化单位，密度 rho*=0.8442
+lattice         fcc 0.8442
+
+# 创建模拟盒子 (晶格单位)
+# z 方向更长 (0-20 个晶格常数) 以观察断裂行为
+# x, y 方向 0-4 个晶格常数
+region          slab block 0 4 0 4 0 20
+create_box      1 slab
+create_atoms    1 box
+
+# 打印初始原子数
+variable        N_init equal count(all)
+print           "初始原子数: ${N_init}"
+
+# ----- 第 3 步：设置力场 -----
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0
+mass            1 1.0
+
+# ----- 第 4 步：初始弛豫 -----
+# 先做能量最小化，消除可能的原子重叠
+# 收敛标准较严格，确保初始构型稳定
+minimize        1.0e-4 1.0e-6 1000 10000
+
+# ----- 第 5 步：NVT 预平衡 -----
+# 在低温下进行预平衡，使系统稳定
+# 选择 T=0.1 很低的温度，近似 0K 拉伸，看清楚断裂过程
+reset_timestep  0
+
+# Nosé-Hoover 恒温器
+# fix nvt:
+#   temp 0.1 0.1 = 起始和终止温度均为 0.1 (约化单位)
+#   0.5           = 热弛豫时间参数
+fix             nvt_prep all nvt temp 0.1 0.1 0.5
+
+# 设置输出
+thermo          100
+thermo_style    custom step temp pe ke etotal press vol lx ly lz
+
+# 时间步长
+timestep        0.002
+
+# 预平衡 2000 步 (教程演示用)
+run             2000
+
+# 解除预平衡的 fix
+unfix           nvt_prep
+
+# ----- 第 6 步：设置拉伸模拟 -----
+# 关键：使用 NPT 系综控制 x, y 方向的压力为 0
+# 而 z 方向使用 fix deform 施加应变
+
+# 保存初始 z 方向长度 (硬编码，因为 LAMMPS 变量是动态引用)
+# 对于 0-20 晶格常数的 LJ FCC (rho*=0.8442): Lz0 = 20 * 1.6796 = 33.592
+variable        Lz0 equal 33.592
+print           "Initial Lz: ${Lz0}"
+
+# 只控制温度，不控制压力
+# x, y 方向自由收缩/膨胀 (NVE 或 NVT 均可)
+fix             nvt_fix all nvt temp 0.1 0.1 0.5
+
+# 设置应变速率参数
+# erate = 拉伸应变速率 (以 1/时间 为单位)
+# 值较小 => 准静态拉伸
+variable        erate equal 0.001
+
+# fix deform 命令：在 z 方向施加恒定应变速率
+#   erate v_erate = 按变量 erate 的应变速率拉伸
+#   remap x       = 拉伸时原子坐标随之重映射
+#   units box     = 以盒子单位操作
+fix             deform_fix all deform 1 z erate 0.01 remap x units box
+
+# ----- 第 7 步：计算应力 -----
+# compute stress/atom 计算每个原子的应力张量
+# 参数:
+#   NULL   = 不计入对势以外的贡献 (这里只有 pair)
+#   注意: 对于 LJ 只需用 pair 贡献即可
+# stress/atom 输出 6 个分量:
+#   1=xx, 2=yy, 3=zz, 4=xy, 5=xz, 6=yz
+compute         stress all stress/atom NULL
+
+# 计算 z 方向的应力 (分量 3 = sigma_zz)
+# 先对每个原子的 zz 应力求和，再除以体积得到宏观应力
+# compute reduce:
+#   sum      = 求和
+#   c_stress[3] = stress/atom 的第 3 个分量 (zz)
+compute         stress_zz all reduce sum c_stress[3]
+
+# 计算 x, y 方向应力 (用于泊松比计算)
+compute         stress_xx all reduce sum c_stress[1]
+compute         stress_yy all reduce sum c_stress[2]
+
+# 计算体积
+variable        vol equal vol
+
+# 计算宏观应力 (应力总和 / 体积)
+# 注意: stress/atom 的单位是 能量*长度 (压力*体积)
+# 除以体积得到压力 (应力)
+variable        sig_zz equal -c_stress_zz/(3*v_vol)
+variable        sig_xx equal -c_stress_xx/(3*v_vol)
+variable        sig_yy equal -c_stress_yy/(3*v_vol)
+
+# 计算工程应变
+#   strain = (L_current - L_initial) / L_initial
+variable        strain equal (lz-v_Lz0)/v_Lz0
+
+# 计算温度和势能
+variable        temp_now equal temp
+variable        pe_now equal pe
+
+# ----- 第 8 步：输出应力-应变数据 -----
+# 使用 fix print 每隔一定步数输出数据
+# 应力-应变曲线是力学分析的核心输出
+# 列: 应变 | zz 应力 | xx 应力 | yy 应力 | 温度 | 势能
+fix             output_stress all print 50 &
+                "${strain} ${sig_zz} ${sig_xx} ${sig_yy} ${temp_now} ${pe_now}" &
+                file stress_strain.dat &
+                screen no &
+                title "# strain sigma_zz sigma_xx sigma_yy temperature pe"
+
+# ----- 第 9 步：轨迹输出 -----
+# 输出完整轨迹用于可视化
+dump            traj all custom 500 dump.tensile.lammpstrj &
+                id type x y z vx vy vz c_stress[1] c_stress[2] c_stress[3]
+
+# 热力学输出
+thermo          500
+thermo_style    custom step temp pe ke etotal press &
+                v_strain v_sig_zz v_sig_xx v_sig_yy lx ly lz
+
+# ----- 第 10 步：运行拉伸 -----
+# 总步数 (教程演示用)
+print           ""
+print           "============================================"
+print           "  Starting Uniaxial Tensile Test"
+print           "============================================"
+print           "Strain rate:     0.01 (1/tau)"
+print           "Timestep:        0.002 tau"
+print           "Total steps:     10000"
+print           "Max strain:      ~20%"
+print           "Pull direction:  z"
+print           "Temperature:     0.1"
+print           "============================================"
+
+run             10000
+
+# ----- 第 11 步：输出最终状态 -----
+variable        final_strain equal (lz-v_Lz0)/v_Lz0
+variable        final_pe equal pe
+variable        final_temp equal temp
+
+print           ""
+print           "============================================"
+print           "  Tensile Test Complete"
+print           "============================================"
+print           "Final strain: ${final_strain}"
+print           "Final temp:   ${final_temp}"
+print           "Final PE:     ${final_pe}"
+print           "============================================"
+print           ""
+print           "Output files:"
+print           "  stress_strain.dat       - stress-strain data"
+print           "  dump.tensile.lammpstrj  - trajectory"
+print           ""
+print           "Plot with gnuplot:"
+print           "  plot 'stress_strain.dat' u 1:2 w l t 'sigma_zz'"
+
+# ----- 第 12 步：写入最终构型 -----
+write_data      data.tensile_final

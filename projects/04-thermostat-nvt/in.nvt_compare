@@ -1,0 +1,241 @@
+# ============================================================
+#  恒温器比较：Nosé-Hoover vs Langevin vs Berendsen
+#  目的：用相同的初始系统，比较三种恒温器的温度控制行为
+#        将温度数据分别输出到文件，便于绘图对比
+#  运行命令：lmp -in in.nvt_compare
+# ============================================================
+
+# =================================================================
+#  方法 1：Nosé-Hoover 恒温器（fix nvt）
+# =================================================================
+#
+# 原理：在拉格朗日量中引入额外的热浴自由度
+#       通过一个耦合变量 ζ 自动调节原子速度
+#       能产生正确的正则系综（NVT）分布
+#       是正式模拟中最常用的恒温器
+
+print           ""
+print           "=========================================="
+print           "  方法 1：Nosé-Hoover 恒温器"
+print           "=========================================="
+
+# --- 初始化系统 ---
+units           lj
+atom_style      atomic
+
+lattice         fcc 0.8442
+region          box block 0 8 0 8 0 8
+create_box      1 box
+create_atoms    1 box
+
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+mass            1 1.0
+
+# 初始化速度：T = 1.0，种子 12345
+# 使用固定的种子，保证三种方法从完全相同的初始状态出发
+velocity        all create 1.0 12345 mom yes rot yes
+
+timestep        0.005
+
+# 设置 Nosé-Hoover NVT 恒温器
+#   T_start = 1.0, T_stop = 1.0, T_damp = 0.5
+fix             1 all nvt temp 1.0 1.0 0.5
+
+# 热力学输出：每 10 步
+thermo          10
+thermo_style    custom step temp pe ke etotal
+
+# 定义变量用于 fix ave/time 输出
+# 注意: c_thermo_ke 和 c_thermo_etotal 不存在,
+# 只有 thermo_temp, thermo_press, thermo_pe 可用
+variable        _ke equal ke
+variable        _etotal equal etotal
+
+# 使用 fix ave/time 将温度数据写入文件
+fix             2 all ave/time 1 1 10 c_thermo_temp c_thermo_pe v__ke v__etotal &
+                file temp_nose_hoover.dat mode scalar
+
+# 记录 LAMMPS 完整日志
+log             log.nose_hoover
+
+# 跑 2000 步 (教程演示用)
+run             2000
+
+unfix           1
+unfix           2
+
+print           ""
+print           "  Nose-Hoover done -> temp_nose_hoover.dat"
+
+# =================================================================
+#  方法 2：Langevin 恒温器（fix langevin + fix nve）
+# =================================================================
+#
+# 原理：在运动方程中添加两项：
+#       - 随机力（fluctuation）：提供热涨落，模拟热浴的随机撞击
+#       - 摩擦力（dissipation）：与速度成正比，耗散多余动能
+#       两者通过涨落-耗散定理联系起来
+#
+# 优点：简单、鲁棒，不容易出问题
+# 缺点：不是严格的正则系综采样
+#        摩擦力会影响动力学性质（如扩散系数）
+#        适用于平衡阶段，不适合计算动力学量
+
+# --- 重新初始化（和上面完全相同）---
+clear
+
+print           ""
+print           "=========================================="
+print           "  方法 2：Langevin 恒温器"
+print           "=========================================="
+
+units           lj
+atom_style      atomic
+
+lattice         fcc 0.8442
+region          box block 0 8 0 8 0 8
+create_box      1 box
+create_atoms    1 box
+
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+mass            1 1.0
+
+# 相同的初始速度（相同的种子）
+velocity        all create 1.0 12345 mom yes rot yes
+
+timestep        0.005
+
+# Langevin 恒温器需要两个 fix 配合使用：
+#
+# fix 1 all nve
+#   执行 Velocity-Verlet 积分（牛顿运动方程）
+#   仅此一步不会控制温度
+#
+# fix 2 all langevin 1.0 1.0 0.5 48279
+#   在 nve 的基础上叠加 Langevin 力
+#   参数：T_start T_stop damping_coefficient random_seed
+#   damping_coefficient = 0.5（阻尼系数，单位：1/时间）
+#   值越小 → 阻尼越弱 → 更接近 NVE
+#   值越大 → 阻尼越强 → 温度控制更快但扰动更大
+fix             1 all nve
+fix             2 all langevin 1.0 1.0 0.5 48279
+
+thermo          10
+thermo_style    custom step temp pe ke etotal
+
+# 温度数据写入文件
+variable        _ke equal ke
+variable        _etotal equal etotal
+fix             3 all ave/time 1 1 10 c_thermo_temp c_thermo_pe v__ke v__etotal &
+                file temp_langevin.dat mode scalar
+
+log             log.langevin
+
+run             2000
+
+unfix           1
+unfix           2
+unfix           3
+
+print           ""
+print           "  Langevin 完成，温度数据 → temp_langevin.dat"
+
+# =================================================================
+#  方法 3：Berendsen 恒温器（fix temp/berendsen + fix nve）
+# =================================================================
+#
+# 原理：每步将所有原子速度乘以一个缩放因子 λ
+#       λ = sqrt(1 + (dt/T_damp) * (T_target/T_current - 1))
+#       使温度以指数弛豫的方式趋向目标值
+#
+# 优点：温度收敛快且平滑，不会有大振荡
+# 缺点：不产生正确的正则系综分布！
+#        所产生的构型分布不满足 Boltzmann 分布
+#        适合用于平衡阶段快速升温/降温
+#        不适合用于正式的数据采集
+
+# --- 重新初始化 ---
+clear
+
+print           ""
+print           "=========================================="
+print           "  方法 3：Berendsen 恒温器"
+print           "=========================================="
+
+units           lj
+atom_style      atomic
+
+lattice         fcc 0.8442
+region          box block 0 8 0 8 0 8
+create_box      1 box
+create_atoms    1 box
+
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+mass            1 1.0
+
+# 相同的初始速度（相同的种子）
+velocity        all create 1.0 12345 mom yes rot yes
+
+timestep        0.005
+
+# Berendsen 恒温器也需要两个 fix 配合：
+#
+# fix 1 all nve
+#   Velocity-Verlet 积分
+#
+# fix 2 all temp/berendsen 1.0 1.0 0.5
+#   Berendsen 温度缩放
+#   参数含义与 Nosé-Hoover 类似：
+#     T_start T_stop T_damp
+#   T_damp 是弛豫时间：温度弛豫到目标值的 e 倍所需时间
+#   T_damp 越小 → 收敛越快（但可能过度修正）
+fix             1 all nve
+fix             2 all temp/berendsen 1.0 1.0 0.5
+
+thermo          10
+thermo_style    custom step temp pe ke etotal
+
+# 温度数据写入文件
+variable        _ke equal ke
+variable        _etotal equal etotal
+fix             3 all ave/time 1 1 10 c_thermo_temp c_thermo_pe v__ke v__etotal &
+                file temp_berendsen.dat mode scalar
+
+log             log.berendsen
+
+run             2000
+
+unfix           1
+unfix           2
+unfix           3
+
+print           ""
+print           "  Berendsen 完成，温度数据 → temp_berendsen.dat"
+
+# =================================================================
+#  总结输出
+# =================================================================
+
+print           ""
+print           "=========================================="
+print           "  三种恒温器比较完成！"
+print           ""
+print           "  温度数据文件（可直接用 gnuplot/matplotlib 绘图）："
+print           "    temp_nose_hoover.dat — Nosé-Hoover 恒温器"
+print           "    temp_langevin.dat    — Langevin 恒温器"
+print           "    temp_berendsen.dat   — Berendsen 恒温器"
+print           ""
+print           "  LAMMPS 完整日志："
+print           "    log.nose_hoover — Nosé-Hoover 日志"
+print           "    log.langevin    — Langevin 日志"
+print           "    log.berendsen   — Berendsen 日志"
+print           ""
+print           "  比较要点："
+print           "    1. 温度收敛速度：哪个最快稳定？"
+print           "    2. 温度涨落幅度：哪个振荡最小？"
+print           "    3. 能量行为：总能量是否守恒？"
+print           "    4. 物理正确性：哪个产生正确的 NVT 分布？"
+print           "=========================================="

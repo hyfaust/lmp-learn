@@ -1,0 +1,98 @@
+# =============================================================
+# 乙烷 (C2H6) 分子动力学模拟
+# 使用 OPLS-AA 力场，NPT 系综
+# =============================================================
+
+# ----- 初始化 -----
+# 使用 real 单位制：能量单位 kcal/mol，距离单位 Angstrom，时间单位 fs
+units           real
+# full 原子样式：支持分子ID、电荷、键/角/二面角拓扑信息
+atom_style      full
+
+# ----- 力场设置 -----
+# 注意：力场样式必须在 read_data 之前定义
+# 因为数据文件中包含 Pair Coeffs、Bond Coeffs、Angle Coeffs
+# LAMMPS 在读取数据文件时需要知道这些系数的格式
+
+# 非键相互作用：Lennard-Jones + 长程库仑，截断距离 10.0 Angstrom
+pair_style      lj/cut/coul/long 10.0
+# 键伸缩势：谐振子模型 V = K*(r - r0)^2
+bond_style      harmonic
+# 键角弯曲势：谐振子模型 V = K*(theta - theta0)^2
+angle_style     harmonic
+
+# 长程静电求解器：PPPM (Particle-Particle Particle-Mesh)
+# 精度参数 1.0e-4 表示力的相对误差小于 10^-4
+kspace_style    pppm 1.0e-4
+
+# 特殊键相互作用设置 (OPLS 力场标准参数)
+# 1-2 相互作用 (直接键合): LJ=0.0, Coul=0.0 (完全排除)
+# 1-3 相互作用 (通过一个原子): LJ=0.0, Coul=0.0 (完全排除)
+# 1-4 相互作用 (通过两个原子): LJ=0.5, Coul=0.5 (减半)
+# 这些缩放因子是 OPLS 力场的核心参数
+special_bonds   lj/coul 0.0 0.0 0.5
+
+# ----- 读取数据文件 -----
+# 从 data.ethane 读取分子拓扑和坐标信息
+# 该文件包含 8 个乙烷分子的原子坐标、键、角等信息
+read_data       data.ethane
+
+# ----- 邻居列表设置 -----
+# 每隔 1 步更新邻居列表，皮层厚度 2.0 Angstrom
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+
+# ----- 能量最小化 -----
+# 在开始动力学之前，先进行能量最小化
+# 这可以消除初始构型中的严重原子重叠
+# 避免在 NPT 模拟开始时因高能构型导致原子飞出盒子
+# maxiter: 最大迭代次数, maxeval: 最大力评估次数
+# ftol: 力的收敛标准, etol: 能量变化收敛标准
+min_style       cg
+minimize        1.0e-4 1.0e-6 1000 10000
+
+# ----- 输出设置 -----
+# 每 100 步输出热力学信息到屏幕
+thermo          100
+# 输出：步数、温度、压力、势能、动能、总能量、密度
+thermo_style    custom step temp press pe ke etotal density
+
+# ----- 轨迹输出 -----
+# 每 100 步写入一帧轨迹文件，包含所有原子的位置
+dump            1 all atom 100 dump.ethane.lammpstrj
+# 写入自定义列到轨迹文件
+dump_modify     1 sort id
+
+# ----- NPT 系综平衡 -----
+# Nosé-Hoover 恒温恒压器
+# 温度: 300 K，阻尼系数 100 fs
+# 压力: 1 atm (0.000101325 GPa)，阻尼系数 1000 fs
+# iso 表示各向同性压力耦合（三个方向等比例缩放）
+fix             1 all npt temp 300.0 300.0 100.0 iso 1.0 1.0 1000.0
+
+# ----- 时间步长 -----
+# 1 fs 时间步长，适合含氢体系（氢原子振动频率高）
+timestep        1.0
+
+# ----- 重置速度 -----
+# 根据 300 K 温度生成初始速度分布
+# 使用 Maxwell-Boltzmann 分布
+velocity        all create 300.0 12345 dist gaussian
+
+# ----- 运行模拟 -----
+# 运行 10000 步 = 10 ps
+run             10000
+
+# ----- 清理 -----
+# 取消所有 fix
+unfix           1
+# 关闭轨迹文件写入
+undump          1
+
+# ----- 最终输出 -----
+# 输出最终热力学信息
+print           "========================================="
+print           "乙烷 NPT 模拟完成！"
+print           "总步数: 10000"
+print           "总模拟时间: 10 ps"
+print           "========================================="

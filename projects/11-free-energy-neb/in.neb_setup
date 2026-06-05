@@ -1,0 +1,202 @@
+# =============================================================================
+# in.neb_setup — 准备 NEB 计算的初始态和末态
+# =============================================================================
+# 本脚本构建一个含有空位的 FCC 晶体，然后生成两种构型：
+#   State 1（初始态）：删去一个原子形成空位
+#   State 2（末态）：  将相邻原子移到空位位置（即空位跳跃）
+# 两种构型分别输出为 data 文件，供后续 NEB 计算使用。
+# =============================================================================
+
+# ----------------------------- 初始化设置 ------------------------------------
+# 使用 LJ 无量纲单位
+units           lj
+# 使用原子风格（每个原子有坐标、类型等基本属性）
+atom_style      atomic
+# 原子间相互作用采用 Lennard-Jones 势
+#   epsilon = 1.0, sigma = 1.0, 截断半径 = 2.5
+pair_style      lj/cut 2.5
+# 边界条件：三维周期性边界（NEB 计算通常需要周期性边界）
+boundary        p p p
+
+# ----------------------------- 创建 FCC 晶体 --------------------------------
+# lattice 命令定义晶格参数
+#   fcc: 面心立方结构
+#   1.0: 晶格常数（LJ 单位下为 1.0，即约等于 sigma）
+lattice         fcc 1.0
+
+# region 定义模拟盒子的范围
+#   box: 整个模拟区域
+#   block: 以晶格常数为单位的 x/y/z 范围，这里取 4x4x4 个晶胞
+region          box block 0 4 0 4 0 4
+
+# 在上述区域内按照 lattice 定义的晶格创建原子
+#   约 4*4*4*4 = 256 个原子（每个 FCC 晶胞含 4 个原子）
+create_box      1 box
+create_atoms    1 box
+
+# ----------------------------- 势能参数 --------------------------------------
+# 定义类型 1-1 之间的 LJ 势参数：
+#   epsilon = 1.0（能量标度）
+#   sigma   = 1.0（长度标度）
+#   截断    = 2.5（已经在 pair_style 中设定，此处显式指定）
+pair_coeff      1 1 1.0 1.0 2.5
+
+# 质量赋值（LJ 单位下设为 1.0）
+mass            1 1.0
+
+# ----------------------------- 第一步：全局弛豫 --------------------------------
+# 输出初始能量，用于后续对比
+# thermo: 设置热力学输出频率和输出项
+thermo          10
+thermo_style    custom step pe lx ly lz press
+
+# 能量最小化：将原子位置弛豫到最近的能量极小点
+#   cg: 共轭梯度法（Conjugate Gradient），适合寻找局部极小值
+#   1.0e-6: 力的收敛阈值（最大原子力 < 1e-6 时停止）
+#   10000: 最大迭代步数
+#   1.0e-8: 能量变化的收敛阈值
+min_style       cg
+minimize        1.0e-8 1.0e-6 10000 10000
+
+# 记录弛豫后的能量（空位形成前）
+variable        E_before equal pe
+print           ">>> 弛豫后总能量（空位形成前）: ${E_before}"
+
+# ----------------------------- 创建空位（State 1 = 初始态）-------------------
+# 我们用 region 来精确定位并删除一个原子
+# 首先重新创建晶体
+clear
+
+# ========================= 重新开始：完整流程 ================================
+# （使用 clear 后需重新定义所有设置）
+
+units           lj
+atom_style      atomic
+pair_style      lj/cut 2.5
+boundary        p p p
+
+lattice         fcc 1.0
+region          box block 0 4 0 4 0 4
+create_box      1 box
+create_atoms    1 box
+
+pair_coeff      1 1 1.0 1.0 2.5
+mass            1 1.0
+
+# 先做一次能量最小化，使晶体完全弛豫
+# 这样初始态和末态都在同一能量面上
+thermo          10
+thermo_style    custom step pe lx ly lz press
+min_style       cg
+minimize        1.0e-8 1.0e-6 10000 10000
+
+# ----------------------------- State 1: 初始态（含空位）-----------------------
+# 使用 region 精确定位要删除的原子
+# 在 FCC 晶格中，选取一个坐标位于 (0.5, 0.5, 0.5) 的原子（晶胞中心）
+# 用小球形区域来选中该原子
+region          vac_sphere sphere 0.5 0.5 0.5 0.1 units box
+
+# 删除该区域内的原子 → 形成单空位
+delete_atoms    region vac_sphere
+
+# 再次最小化（让空位周围的原子弛豫）
+min_style       cg
+minimize        1.0e-8 1.0e-6 10000 10000
+
+# 记录空位态的能量
+variable        E_vac equal pe
+print           ">>> 空位态（初始态）总能量: ${E_vac}"
+
+# 输出初始态的数据文件
+#   data.initial: 包含原子坐标、盒子信息、势能参数
+#   这是 NEB 计算的起始构型
+write_data      data.initial
+
+# 输出初始态的 dump 文件（用于可视化）
+dump            init all custom 1 dump.initial.lammpstrj id type x y z
+run             0
+undump          init
+
+# ----------------------------- State 2: 末态（空位跳跃）-----------------------
+# 空位跳跃的物理含义：
+#   在晶格中，一个原子从其正常格点跳到相邻的空位位置
+#   初始态：空位在 (0.5, 0.5, 0.5)
+#   末态：  空位移动到 (0.5+dx, 0.5+dy, 0.5+dz)
+#
+# 我们选取离空位最近的一个面心原子，将其移到空位位置
+# 在 FCC 晶格中，最近邻距离为 a/sqrt(2) ≈ 0.7071
+# 取 (0.5+1.0/sqrt(2), 0.5, 0.5) 方向的一个原子
+#
+# 更清晰的做法：重新构建末态
+clear
+
+# ========================= 构建末态 ================================
+units           lj
+atom_style      atomic
+pair_style      lj/cut 2.5
+boundary        p p p
+
+lattice         fcc 1.0
+region          box block 0 4 0 4 0 4
+create_box      1 box
+create_atoms    1 box
+
+pair_coeff      1 1 1.0 1.0 2.5
+mass            1 1.0
+
+# 同样的最小化
+thermo          10
+thermo_style    custom step pe lx ly lz press
+min_style       cg
+minimize        1.0e-8 1.0e-6 10000 10000
+
+# 先删除空位位置的原子（与初始态相同的位置）
+region          vac_sphere sphere 0.5 0.5 0.5 0.1 units box
+delete_atoms    region vac_sphere
+
+# 现在选取空位最近邻的一个原子并将其移动到空位位置
+# FCC 中 (0.5, 0.5, 0.5) 的最近邻是 (1.0, 1.0, 0.5) 等面心位置
+# 距离 = sqrt((1.0-0.5)^2 + (1.0-0.5)^2 + (0.5-0.5)^2) = sqrt(0.5) ≈ 0.7071
+# 选取 (1.0, 1.0, 0.5) 处的原子移动到 (0.5, 0.5, 0.5)
+
+# 用 region 选中 (1.0, 1.0, 0.5) 附近的原子
+region          neighbor_atom sphere 1.0 1.0 0.5 0.1 units box
+group           mobile_atom region neighbor_atom
+
+# 将该原子移动到空位位置
+#   (0.5 - 1.0, 0.5 - 1.0, 0.5 - 0.5) = (-0.5, -0.5, 0.0)
+displace_atoms  mobile_atom move -0.5 -0.5 0.0 units box
+
+# 末态也需要弛豫
+min_style       cg
+minimize        1.0e-8 1.0e-6 10000 10000
+
+# 记录末态能量
+variable        E_final equal pe
+variable        dE equal v_E_final-v_E_vac
+print           ">>> 末态（空位跳跃后）总能量: ${E_final}"
+print           ">>> 能量差: ${dE}"
+
+# 输出末态数据文件
+write_data      data.final
+
+# 输出末态的 dump 文件
+dump            final all custom 1 dump.final.lammpstrj id type x y z
+run             0
+undump          final
+
+# ----------------------------- 汇总信息 -------------------------------------
+print           ""
+print           "============================================"
+print           "  NEB 初始态和末态准备完毕！"
+print           "  初始态文件: data.initial"
+print           "  末态文件:   data.final"
+print           "============================================"
+print           "  初始态能量: ${E_vac}"
+print           "  末态能量:   ${E_final}"
+print           "  能量差:     ${dE}"
+print           "============================================"
+print           ""
+print           "  下一步：运行 in.neb 进行 NEB 计算"
+print           "  命令: mpirun -np 4 lmp -in in.neb"
+print           "============================================"

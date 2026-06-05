@@ -1,0 +1,188 @@
+# ============================================================
+# 铜的热膨胀模拟
+# Thermal Expansion of Copper
+# ============================================================
+#
+# 本脚本在不同温度下运行 NPT 模拟，测量铜的晶格常数
+# 从而展示金属的热膨胀行为
+#
+# 方法: 在每个温度下平衡 5000 步，记录平均晶格参数
+# 温度序列: 100K → 300K → 500K → 700K → 900K
+#
+# 关于势函数:
+#   - 使用 lj/cut 简化模型（与 in.cu_crystal 相同参数）
+#   - 真实研究请使用 EAM 势:
+#     pair_style eam
+#     pair_coeff * * Cu_u3.eam
+#   - EAM 势函数文件: https://www.ctcms.nist.gov/potentials/
+
+# ----- 初始化 -----
+clear
+
+# ----- 基本设置 -----
+units metal
+atom_style atomic
+
+# 创建 8×8×8 的 FCC 铜晶体（比 10×10×10 小一些，加快计算）
+# 8×8×8 × 4 = 2048 个原子
+lattice fcc 3.615
+region box block 0 8 0 8 0 8 units lattice
+create_box 1 box
+create_atoms 1 box
+mass 1 63.546
+
+# ----- 力场 -----
+# LJ 势参数（近似铜，详见 in.cu_crystal 的注释）
+pair_style lj/cut 4.0
+pair_coeff 1 1 0.343 2.54
+
+# ----- 邻居列表 -----
+neighbor 2.0 bin
+
+# ----- 时间步长 -----
+timestep 0.001
+
+# ----- 输出设置 -----
+thermo 100
+thermo_style custom step temp pe ke etotal press vol lx density
+
+# ----- 晶格常数变量 -----
+# lx / 8.0: x 方向盒子长度除以单元格数 = 晶格常数
+variable lat equal lx/8.0
+
+# ----- 轨迹输出（可选，可以注释掉以加快速度）-----
+# 每 500 步输出一帧，文件较大时可增大间隔
+dump myDump all atom 500 cu_thermal.lammpstrj
+
+# ============================================================
+# 能量最小化（只做一次）
+# ============================================================
+print "===== 初始能量最小化 ====="
+minimize 1.0e-4 1.0e-6 1000 10000
+
+# ============================================================
+# 多温度 NPT 模拟
+# ============================================================
+#
+# 策略: 逐个温度进行模拟
+#   每个温度点:
+#   1. 设置 NPT fix，从当前温度升温到目标温度
+#   2. 平衡 5000 步
+#   3. 记录平均晶格常数
+#   4. 删除旧的 fix，准备下一个温度
+#
+# 为什么要"逐步升温"?
+#   - 如果直接从 300K 跳到 900K，体系可能不稳定
+#   - 逐步升温更接近物理过程，也更稳定
+
+# 打开文件用于输出结果
+# fix print 将数据写入文件
+# 我们将在每个温度循环中手动记录
+
+print "================================================"
+print "        铜的热膨胀模拟"
+print "        Thermal Expansion of Copper"
+print "================================================"
+print ""
+print "温度点: 100K, 300K, 500K, 700K, 900K"
+print "每个温度平衡 5000 步 (5 ps)"
+print ""
+
+# ----- 温度 1: 100 K -----
+print "----- 温度: 100 K -----"
+# unfix: 删除之前的 fix（如果存在）
+# 在第一个温度点之前没有 npt fix，所以用标签判断
+# 这里我们用一种简单的方式: 每次创建新的 fix 并在循环结束时 unfix
+
+fix npt_100 all npt temp 100 100 0.1 iso 0 0 1.0
+
+# fix ave/time: 计算晶格常数的时间平均
+#   - 1 10 500: 每步计算，每10步平均，每500步输出
+#   - 在5000步的运行中，会输出约10个数据点
+fix ave_100 all ave/time 1 10 500 v_lat file lattice_100K.dat mode scalar
+
+# 升温: 从当前温度到 100K（实际上是从最低温度开始）
+# 在 NPT 下运行 5000 步 = 5 ps
+run 5000
+
+# 删除这个温度的 fix
+unfix npt_100
+unfix ave_100
+
+# ----- 温度 2: 300 K -----
+print "----- 温度: 300 K -----"
+# 从 100K 升温到 300K
+# temp 100 300: 起始100K，终止300K
+fix npt_300 all npt temp 100 300 0.1 iso 0 0 1.0
+fix ave_300 all ave/time 1 10 500 v_lat file lattice_300K.dat mode scalar
+run 5000
+unfix npt_300
+unfix ave_300
+
+# ----- 温度 3: 500 K -----
+print "----- 温度: 500 K -----"
+fix npt_500 all npt temp 300 500 0.1 iso 0 0 1.0
+fix ave_500 all ave/time 1 10 500 v_lat file lattice_500K.dat mode scalar
+run 5000
+unfix npt_500
+unfix ave_500
+
+# ----- 温度 4: 700 K -----
+print "----- 温度: 700 K -----"
+fix npt_700 all npt temp 500 700 0.1 iso 0 0 1.0
+fix ave_700 all ave/time 1 10 500 v_lat file lattice_700K.dat mode scalar
+run 5000
+unfix npt_700
+unfix ave_700
+
+# ----- 温度 5: 900 K -----
+print "----- 温度: 900 K -----"
+fix npt_900 all npt temp 700 900 0.1 iso 0 0 1.0
+fix ave_900 all ave/time 1 10 500 v_lat file lattice_900K.dat mode scalar
+run 5000
+unfix npt_900
+unfix ave_900
+
+# ============================================================
+# 结果汇总
+# ============================================================
+# 最终状态输出
+variable final_lat equal lx/8.0
+variable final_temp equal temp
+run 0
+
+print ""
+print "================================================"
+print "        热膨胀模拟完成！"
+print "================================================"
+print ""
+print "输出文件:"
+print "  - lattice_100K.dat  : 100K 时的晶格常数"
+print "  - lattice_300K.dat  : 300K 时的晶格常数"
+print "  - lattice_500K.dat  : 500K 时的晶格常数"
+print "  - lattice_700K.dat  : 700K 时的晶格常数"
+print "  - lattice_900K.dat  : 900K 时的晶格常数"
+print "  - cu_thermal.lammpstrj: 原子轨迹（用 OVITO 查看）"
+print ""
+print "数据分析建议:"
+print "  1. 取每个温度文件最后一列的平均值作为该温度的晶格常数"
+print "  2. 用 Python/gnuplot 绘制 晶格常数 vs 温度 的曲线"
+print "  3. 线膨胀系数 α = (1/a) × (da/dT)"
+print "     其中 a 是晶格常数，T 是温度"
+print "  4. 铜的实验线膨胀系数约为 16.5 × 10⁻⁶ /K"
+print ""
+print "Python 分析示例 (读取各温度的平均晶格常数):"
+print ""
+print "  import numpy as np"
+print "  temps = [100, 300, 500, 700, 900]"
+print "  lats = []"
+print "  for T in temps:"
+print "      data = np.loadtxt(f'lattice_{T}K.dat')"
+print "      lats.append(np.mean(data[:, 1]))  # 第2列是晶格常数"
+print "  # 绘图"
+print "  import matplotlib.pyplot as plt"
+print "  plt.plot(temps, lats, 'o-')"
+print "  plt.xlabel('Temperature (K)')"
+print "  plt.ylabel('Lattice constant (Angstrom)')"
+print "  plt.title('Thermal Expansion of Copper')"
+print "  plt.savefig('thermal_expansion.png', dpi=150)"

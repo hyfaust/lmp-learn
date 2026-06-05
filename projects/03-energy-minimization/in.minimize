@@ -1,0 +1,203 @@
+# ============================================================
+#  LAMMPS 能量最小化教程
+#  目的：演示如何将一个高能量（原子重叠）的系统通过
+#        能量最小化降到稳定的低能量构型，并与后续 MD 进行对比
+# ============================================================
+
+# ---------------- 第一部分：初始化和建模 ----------------
+
+# 使用 Lennard-Jones 无量纲单位
+# 在 LJ 单位中：长度以 sigma 为单位，能量以 epsilon 为单位，质量以 m 为单位
+# 这样可以避免处理具体的物理常数，专注于学习方法
+units           lj
+
+# 原子样式：最简单的类型，只记录位置和类型
+# 其他样式（如 charge, molecular）会记录更多信息
+atom_style      atomic
+
+# 创建一个立方体模拟盒子
+# lattice fcc 1.0 —— 创建面心立方(FCC)格子，密度参数为 1.0
+# FCC 是铜、铝、金等常见金属的晶体结构
+# 密度 1.0 意味着每单位体积有 1 个原子
+lattice         fcc 1.0
+
+# 定义模拟区域：
+# region box block 0 5 0 5 0 5 —— 定义一个长方体区域
+#   x 方向从 0 到 5（以格子常数为单位）
+#   y 方向从 0 到 5
+#   z 方向从 0 到 5
+# create_box 1 box —— 在该区域创建模拟盒子，有 1 种原子类型
+# create_atoms 1 box —— 在盒子中按 FCC 格点填充原子
+#   这将生成约 500 个原子（5^3 = 125 个晶胞，每个晶胞 4 个原子）
+region          box block 0 5 0 5 0 5
+create_box      1 box
+create_atoms    1 box
+
+# 定义 Lennard-Jones 势函数
+#   pair_style lj/cut 2.5 —— 使用 LJ 势，截断半径为 2.5 sigma
+#   pair_coeff 1 1 1.0 1.0 2.5 —— 设置参数：
+#     epsilon = 1.0（势阱深度，即能量标度）
+#     sigma   = 1.0（原子有效直径，即长度标度）
+#     cutoff  = 2.5（截断半径，超过此距离不计算相互作用）
+#
+# LJ 势的形式：V(r) = 4*epsilon*[(sigma/r)^12 - (sigma/r)^6]
+#   r^(-12) 项：短程排斥（原子靠太近时力急剧增大）
+#   r^(-6) 项：长程吸引（范德华力）
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+
+# 设置原子质量（无量纲单位中为 1.0）
+mass            1 1.0
+
+# ---------------- 第二部分：制造高能量初始构型 ----------------
+
+# 目的：故意让原子偏离完美格点，产生高能量构型
+# 这模拟了实际研究中常见的"糟糕"初始构型
+#
+# 为什么需要这样做？
+# 实际研究中，构建初始构型时经常会出现问题：
+#   - 随机放置原子时某些原子靠得太近
+#   - 合并多个分子结构时产生重叠
+#   - 插入缺陷时原子位置不合理
+# 这些问题会产生巨大的排斥力，直接跑 MD 会导致数值崩溃
+
+# 方法：将所有原子随机偏移 ±0.2 sigma
+# displace_atoms 命令可以移动原子
+# random dx dy dz seed —— 在 x、y、z 方向各随机偏移 ±dx（均匀分布）
+# 12345 是随机种子，确保结果可重复
+#
+# 偏移 0.2 sigma 后，原本最近邻距离为 ~1.12 sigma 的原子
+# 可能变得只有 ~0.72 sigma 甚至更近
+# 这会导致 LJ 排斥势急剧增大，产生高能量和巨大的力
+group           allatoms type 1
+displace_atoms  allatoms random 0.2 0.2 0.2 12345
+
+# 设置热力学输出
+# thermo 1 —— 每步都输出（便于观察收敛过程）
+thermo          1
+
+# 自定义输出格式
+#   step  —— 迭代步数
+#   pe    —— 势能（Potential Energy），应逐步减小
+#   ke    —— 动能（最小化中始终为 0，因为没有速度）
+#   etotal—— 总能量（= pe + ke）
+#   temp  —— 温度（最小化中始终为 0）
+#   press —— 压力
+#   fmax  —— 所有原子上最大的力分量（任何原子在任何方向上的最大力）
+#   fnorm —— 力的范数（所有力分量的均方根值，衡量整体力的大小）
+thermo_style    custom step pe ke etotal temp press fmax fnorm
+
+print           "=========================================="
+print           "  初始构型已生成（原子随机偏移，产生高能量）"
+print           "  下面开始能量最小化..."
+print           "=========================================="
+
+# 保存初始（高能量）构型
+dump            initial all custom 1 dump.initial.lammpstrj id type x y z
+
+# 先运行 0 步，只是为了输出初始状态的热力学信息
+# 此时能量应该非常高（正值），力也非常大
+run             0
+
+# 关闭初始构型的 dump
+undump          initial
+
+# ---------------- 第三部分：能量最小化 ----------------
+
+# 什么是能量最小化？
+#   找到势能面上的一个局部最低点
+#   即让所有原子上的力趋近于零
+#   就像让球滚到最近的山谷底部
+
+# 设置共轭梯度法（Conjugate Gradient，CG）
+#   CG 是一种迭代优化算法
+#   比最速下降法更快收敛，是 LAMMPS 推荐的默认方法
+min_style       cg
+
+# min_modify 控制最小化的细节参数
+#   dmax 0.1 —— 每步最大位移为 0.1 sigma
+#   限制步长可以避免步子太大导致"跳过"最低点
+#   对于重叠严重的系统，小步长更稳定
+min_modify      dmax 0.1
+
+# 设置热力学输出频率
+#   thermo 1 —— 每步都输出（便于观察收敛过程）
+thermo          1
+
+# 自定义输出格式（同上）
+thermo_style    custom step pe ke etotal temp press fmax fnorm
+
+print           ""
+print           "=========================================="
+print           "  开始共轭梯度（CG）能量最小化"
+print           "  收敛条件：ftol=1.0e-6, etol=1.0e-6"
+print           "  最大迭代步数：10000"
+print           "=========================================="
+
+# 执行能量最小化！
+#   minimize etol ftol maxiter maxeval
+#   etol    = 1.0e-6  —— 能量收敛容差：连续两步能量变化 < etol 时停止
+#   ftol    = 1.0e-6  —— 力收敛容差：最大力 < ftol 时停止
+#   maxiter = 10000   —— 最大迭代步数
+#   maxeval = 100000  —— 最大力/能量计算次数
+minimize        1.0e-6 1.0e-6 10000 100000
+
+print           ""
+print           "=========================================="
+print           "  能量最小化完成！"
+print           "=========================================="
+print           ""
+
+# 保存最小化后的构型
+dump            minimized all custom 1 dump.minimized.lammpstrj id type x y z
+run             0
+undump          minimized
+
+# ---------------- 第四部分：验证——最小化后跑 MD ----------------
+
+# 目的：验证最小化后的系统是否稳定
+# 如果最小化成功，系统应该处于（或接近）势能最低点
+# 在 NVE 系综下跑 MD，总能量应该守恒（不会剧烈变化）
+
+print           ""
+print           "=========================================="
+print           "  验证：在最小化构型上运行 1000 步 NVE MD"
+print           "  如果最小化成功，总能量应基本守恒"
+print           "=========================================="
+print           ""
+
+# 设置速度初始化
+#   velocity all create 0.5 12345 mom yes rot yes
+#   温度 0.5（适中的温度，LJ 单位）
+#   12345 是随机种子
+#   mom yes  —— 移除总动量（避免整个盒子漂移）
+#   rot yes  —— 移除总角动量
+velocity        all create 0.5 12345 mom yes rot yes
+
+# NVE 系综：粒子数(N)、体积(V)、能量(E) 守恒
+# 这是最简单的系综，不控制温度或压力
+# 在 NVE 中，总能量 etotal 应该守恒（基本不变）
+# 温度会根据动能自动确定
+fix             nve_run all nve
+
+# 每 10 步输出一次热力学信息
+thermo          10
+
+# 输出：步数、势能、动能、总能量、温度、压力
+# 关键观察：总能量 etotal 在 NVE 下应基本不变（波动很小）
+thermo_style    custom step pe ke etotal temp press
+
+# 保存 MD 轨迹（每 10 步保存一帧）
+dump            md_traj all custom 10 dump.md.lammpstrj id type x y z
+
+# 跑 1000 步 NVE MD
+run             1000
+
+print           ""
+print           "=========================================="
+print           "  全部计算完成！"
+print           "  输出文件："
+print           "    dump.initial.lammpstrj   — 初始（高能量）构型"
+print           "    dump.minimized.lammpstrj — 最小化后构型"
+print           "    dump.md.lammpstrj        — MD 轨迹"
+print           "=========================================="

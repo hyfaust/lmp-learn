@@ -1,0 +1,166 @@
+# ============================================================
+# LAMMPS 输入脚本：Couette 剪切流 (非平衡分子动力学)
+# 功能：用 Lees-Edwards 边界条件模拟简单剪切流
+#       计算速度剖面和剪切粘度
+# 单位：lj (Lennard-Jones 约化单位)
+# ============================================================
+
+# ----------------------------------------------------------
+# 第 1 部分：初始化和模型搭建
+# ---------------------------------------------------------- 
+
+# 清除所有旧定义
+clear
+
+# 使用 LJ 约化单位
+units           lj
+
+# 原子样式：原子有质量，模拟 3D
+atom_style      atomic
+
+# 创建一个正交的 3D 模拟盒子
+# ly 较长是因为剪切方向为 y，需要足够厚度来获得好的速度剖面
+lattice         fcc 0.8442
+#              xlo  xhi  ylo  yhi  zlo  zhi
+region          box block 0 6  0 12  0 6
+create_box      1 box
+
+# 在盒子中填充 LJ 原子
+create_atoms    1 box
+
+# 转换为三斜盒子 (fix deform xy erate 需要)
+change_box      all triclinic
+
+# 定义 LJ 势函数
+# epsilon = 1.0, sigma = 1.0, 截断半径 = 2.5σ
+mass            1 1.0
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+
+# ----------------------------------------------------------
+# 第 2 部分：初始平衡（先让系统达到平衡态）
+# ----------------------------------------------------------
+
+# 邻居列表设置
+neighbor        0.3 bin
+neigh_modify    every 5 delay 0 check yes
+
+# 温度初始化：用随机速度对应 T*=1.4 的温度
+velocity        all create 1.4 12345
+
+# 先用 NVT 系综做短暂平衡（2000 步）
+# 此时还没有施加剪切
+fix             1 all nvt temp 1.4 1.4 0.5
+
+# 每 100 步输出一次热力学信息
+thermo          100
+thermo_style    custom step temp press pe ke etotal
+
+# 平衡运行
+run             2000
+
+# 解除平衡阶段的 NVT 约束
+unfix           1
+
+# ----------------------------------------------------------
+# 第 3 部分：施加剪切（非平衡 MD 的核心）
+# ----------------------------------------------------------
+
+# 重置时间步的积分器
+reset_timestep  0
+
+# 【关键命令】fix deform：施加连续剪切变形
+# 参数解释：
+#   1          : 每 1 步对盒子做一次变形
+#   xy erate   : 在 xy 平面施加恒定剪切应变率
+#   0.01       : 剪切应变率 γ̇ = 0.01 (LJ 时间单位的倒数)
+#   remap v    : 原子速度随盒子变形一起重新映射（而非原子位置）
+#
+# 物理含义：模拟盒子的顶部以恒定速度相对底部移动
+# 这实现了 Lees-Edwards 边界条件，产生 Couette 流
+fix             2 all deform 1 xy erate 0.01 remap v
+
+# 温度控制：NVT 系综
+# 使用 Nose-Hoover 恒温器
+# 注意：在 NEMD 中，温度的计算需要扣除质心运动
+fix             3 all nvt temp 1.4 1.4 0.5
+
+# ----------------------------------------------------------
+# 第 4 部分：计算速度剖面
+# ----------------------------------------------------------
+
+# 将模拟盒子沿 y 方向分成若干层（chunk）
+# y 方向是速度梯度方向
+# nbin = 40 表示分成 40 层，每层 1σ 宽
+compute         layers all chunk/atom bin/1d y lower 1.0 units reduced
+
+# 计算每层的时间平均速度（vx, vy, vz）
+# 每 10 步采样一次，每 100 步输出一次平均值
+# c_thermal 是用于 NEMD 温度修正的热力学计算
+# 这里我们直接计算每层的 vx 分量
+fix             4 all ave/chunk 10 10 100 layers vx file velocity_profile.dat
+
+# ----------------------------------------------------------
+# 第 5 部分：计算应力（剪切应力 σ_xy）
+# ----------------------------------------------------------
+
+# 计算每原子的应力张量
+# 参数 virial/atom 返回每个原子的 6 个应力分量：
+# xx, yy, zz, xy, xz, yz
+compute         stress all stress/atom NULL
+
+# 对每原子的应力分量求和得到全局值
+compute         sxy_sum all reduce sum c_stress[4]
+compute         sxx_sum all reduce sum c_stress[1]
+compute         syy_sum all reduce sum c_stress[2]
+
+variable        sxy equal c_sxy_sum
+variable        sxx equal c_sxx_sum
+variable        syy equal c_syy_sum
+
+# 对应力做时间平均（每步采样，每 100 步输出平均值）
+fix             5 all ave/time 1 1 100 v_sxy v_sxx v_syy &
+                file stress.dat mode scalar
+
+# ----------------------------------------------------------
+# 第 6 部分：输出热力学信息和运行
+# ----------------------------------------------------------
+
+# 重置热力学输出格式
+thermo          1000
+thermo_style    custom step temp press pe ke etotal &
+                v_sxy
+
+# 每 1000 步输出一个 restart 文件（可选）
+# restart         1000 restart.shear
+
+# 运行 NEMD 模拟：3000 步
+run             3000
+
+# ----------------------------------------------------------
+# 第 7 部分：计算粘度
+# ----------------------------------------------------------
+
+# 最终输出一条有用的信息
+# 粘度的计算公式：η = σ_xy / γ̇
+# σ_xy 从 stress.dat 中的时间平均获得
+# γ̇ = 0.01（我们设定的剪切速率）
+#
+# 在实际操作中，你需要：
+# 1. 读取 stress.dat 中 σ_xy 的时间平均值
+# 2. 用公式 η = <σ_xy> / γ̇ 计算粘度
+# 3. 也可以从 velocity_profile.dat 中拟合 dvx/dy 验证
+
+print           "============================================"
+print           "NEMD 剪切模拟完成！"
+print           "============================================"
+print           ""
+print           "后续分析步骤："
+print           "  1. 查看 velocity_profile.dat — 速度剖面应为线性分布"
+print           "  2. 查看 stress.dat — 计算 σ_xy 的时间平均值"
+print           "  3. 粘度计算：η = <σ_xy> / γ̇ = <σ_xy> / 0.01"
+print           ""
+print           "建议用 Python 绘制速度剖面图，验证线性关系。"
+
+# 写出最终构型（用于可视化）
+write_data      final_shear.dat

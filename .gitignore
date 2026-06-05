@@ -1,0 +1,13 @@
+.qwen/
+*.log
+log.*
+*.dat
+dump.*
+*.lammpstrj
+data.*
+restart.*
+*.png
+stdout.txt
+__pycache__/
+*.pyc
+.DS_Store
