@@ -1,0 +1,70 @@
+# ============================================================
+# in.diffusion — 用 MSD 方法计算 LJ 液体的扩散系数
+# D = MSD / (6*t)  (三维体系)
+# ============================================================
+
+# ---- 1. 基本设置 ----
+units           lj
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+# ---- 2. 创建模拟盒子 ----
+# LJ 体系在三相点附近的液态密度 rho* = 0.8442
+lattice         fcc 0.8442
+region          simbox block 0 5 0 5 0 5
+create_box      1 simbox
+create_atoms    1 box
+
+# ---- 3. 势函数 ----
+# 标准 LJ 势，截断半径 2.5 sigma
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+pair_modify     shift yes
+
+# ---- 4. 质量和初始速度 ----
+mass            1 1.0
+velocity        all create 1.0 12345 dist gaussian
+
+# ---- 5. 邻居列表 ----
+neighbor        0.3 bin
+neigh_modify    every 1 delay 0 check yes
+
+# ---- 6. 热力学输出 ----
+thermo          1000
+thermo_style    custom step temp pe ke etotal press
+
+# ============================================================
+# 第一阶段：NVT 平衡 (5000 步)
+# ============================================================
+print           "=== Phase 1: NVT Equilibration ==="
+fix             1 all nvt temp 1.0 1.0 0.5
+run             5000
+unfix           1
+
+# ============================================================
+# 第二阶段：NVE 生产运行 (50000 步)
+# 使用 NVE 系综，避免恒温器对速度的干扰
+# ============================================================
+print           "=== Phase 2: NVE Production Run ==="
+fix             1 all nve
+
+# compute msd 从当前时刻开始追踪位移
+# c_msd[1] = x方向, c_msd[2] = y方向, c_msd[3] = z方向, c_msd[4] = 总MSD
+compute         msd all msd
+
+# 每 100 步输出一次 MSD
+fix             2 all ave/time 100 1 100 c_msd[4] file msd.dat
+
+# 输出轨迹文件
+dump            1 all custom 1000 dump.lammpstrj id type x y z vx vy vz
+dump_modify     1 sort id
+
+thermo          5000
+thermo_style    custom step temp pe ke etotal press c_msd[4]
+run             50000
+
+print           "=== 计算完成 ==="
+print           "请查看 msd.dat 获取均方位移数据"
+print           "扩散系数 D = MSD / (6*t)，即 MSD vs t 曲线斜率除以 6"
+print           "提示: 使用 Python 对 msd.dat 做线性拟合可得到 D"

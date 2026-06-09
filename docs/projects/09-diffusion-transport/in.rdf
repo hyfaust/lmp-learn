@@ -1,0 +1,70 @@
+# ============================================================
+# in.rdf — 径向分布函数 (RDF) 计算
+# LJ 液体体系的 g(r) 分析
+# ============================================================
+
+# ---- 1. 基本设置 ----
+units           lj
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+# ---- 2. 创建模拟盒子 ----
+lattice         fcc 0.8442
+region          simbox block 0 5 0 5 0 5
+create_box      1 simbox
+create_atoms    1 box
+
+# ---- 3. 势函数 ----
+pair_style      lj/cut 2.5
+pair_coeff      1 1 1.0 1.0 2.5
+pair_modify     shift yes
+
+# ---- 4. 质量和初始速度 ----
+mass            1 1.0
+velocity        all create 1.0 12345 dist gaussian
+
+# ---- 5. 邻居列表 ----
+neighbor        0.3 bin
+neigh_modify    every 1 delay 0 check yes
+
+# ---- 6. 热力学输出 ----
+thermo          1000
+thermo_style    custom step temp pe ke etotal press
+
+# ============================================================
+# 第一阶段：NVT 平衡 (5000 步)
+# ============================================================
+print           "=== Phase 1: NVT Equilibration ==="
+fix             1 all nvt temp 1.0 1.0 0.5
+run             5000
+unfix           1
+
+# ============================================================
+# 第二阶段：NVT 生产运行 — 计算 RDF
+# ============================================================
+print           "=== Phase 2: RDF Production Run ==="
+fix             1 all nvt temp 1.0 1.0 0.5
+
+# compute rdf: 100 个 bin，type 1 - type 1 的对分布函数
+# Nevery=1, Nrepeat=10, Nfreq=1000 → 每1000步输出一次平均RDF
+compute         rdf all rdf 100 1 1
+fix             3 all ave/time 100 10 1000 c_rdf[*] file rdf.dat mode vector
+
+# 输出轨迹
+dump            1 all custom 2000 dump.rdf.lammpstrj id type x y z
+dump_modify     1 sort id
+
+thermo          2000
+thermo_style    custom step temp pe ke etotal press
+
+run             10000
+
+# ---- 清理 ----
+unfix           1
+unfix           3
+
+print           "=== 计算完成 ==="
+print           "请查看 rdf.dat 获取径向分布函数数据"
+print           "rdf.dat 格式: 第1列=bin编号, 第2列=r距离, 第3列=g(r)"
+print           "提示: 用 matplotlib 或 gnuplot 绘制 g(r) vs r 曲线"
